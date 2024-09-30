@@ -1,6 +1,6 @@
 from typing import List
 
-from tsppso.datatypes import Position
+from datatypes import Position
 
 
 class TSPDataset(object):

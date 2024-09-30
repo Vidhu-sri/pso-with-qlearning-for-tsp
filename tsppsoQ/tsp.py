@@ -1,11 +1,10 @@
 from dataclasses import dataclass
 from functools import total_ordering
 from random import Random
-from typing import Union, Tuple, List, Iterable, Sequence
+from typing import Union, Tuple, List, Iterable, Sequence, Dict
 
-from tsppso.datatypes import FloatMatrix, Position
-from tsppso.utilities import distances_matrix, lshift, neighborhood_inversion
-
+from datatypes import FloatMatrix, Position
+from utilities import distances_matrix, lshift, neighborhood_inversion
 
 class Problem(object):
     def __init__(
@@ -52,17 +51,16 @@ class Solution(object):
         return self.cost < other.cost
 
 
-def pso_minimize(
+def pso_q_learning_minimize(
         n: int,
         poolsize: int,
         distances: FloatMatrix,
-        p1: float = 0.9,
-        p2: float = 0.05,
-        p3: float = 0.05,
+        alpha: float = 0.1,
+        gamma: float = 0.9,
+        epsilon: float = 0.1,
         max_no_improv: int = 3,
         rng: Random = None
-) -> Solution:
-
+):
     rng = Random() if rng is None else rng
 
     # Initialize pool of solutions.
@@ -80,35 +78,106 @@ def pso_minimize(
 
     counter = 0
 
+    convergence = []
+
+    # Initialize Q-table: Each particle has its own Q-table
+    # States: Difference in cost between current cost and personal best and global best
+    # Actions: 0 (independent), 1 (personal best), 2 (global best)
+    q_tables = [{} for _ in range(poolsize)]
+
     while n > 0:
-        print('i:', counter, 'cost:', global_solution.cost)
+        print('Iteration:', counter, 'Global Best Cost:', global_solution.cost)
+
+        convergence.append(global_solution.cost)
+
         counter += 1
 
         for i, solution in enumerate(solutions):
-            # Define Solution particles movement.
-            velocity = define_velocity([p1, p2, p3], rng)
+       
+            # state can be categorized based on cost difference
+            
 
-            if velocity == 0:  # move independently on it's own.
+            cost_diff_personal = (solution.cost - solution.best_cost) / solution.best_cost
+            cost_diff_global = (solution.cost - global_solution.cost) / global_solution.cost
+
+
+            state = (categorize_relative_cost_diff(cost_diff_personal), categorize_relative_cost_diff(cost_diff_global))
+
+            #  ε-greedy policy
+            q_table = q_tables[i]
+            if rng.random() < epsilon:
+                action = rng.choice([0, 1, 2])  # Explore
+            else:
+                action = select_best_action(q_table, state)
+
+            # Save current cost for reward calculation
+            prev_cost = solution.cost
+
+           
+            if action == 0:  # move independently
                 move_solution_independently(solution, distances, max_no_improv, rng)
-            elif velocity == 1:  # move toward personal best position.
+            elif action == 1:  # move toward personal best
                 move_solution_to_personal_best(solution, distances)
-            else:  # move toward swarm best position.
+            else:  # move toward swarm best
                 move_solution_to_swarm_best(solution, global_solution, distances)
 
+            #reward
+            reward = -(solution.cost - prev_cost)
+
             if solution.cost < solution.best_cost:
-                # Update each particle's personal best solution.
-                solution.best_sequence = solution.sequence
+                solution.best_sequence = solution.sequence.copy()
                 solution.best_cost = solution.cost
 
+      
+            next_state = (categorize_relative_cost_diff(solution.cost - solution.best_cost),
+                          categorize_relative_cost_diff(solution.cost - global_solution.cost))
+
+            update_q_table(q_table, state, action, reward, next_state,alpha,gamma)
+
+        # Update global best solution
         global_solution_index = solutions.index(min(solutions))
         copy_solution_to(solutions[global_solution_index], global_solution)
 
-        p1 *= 0.95
-        p2 *= 1.01
-        p3 = 1 - (p1 + p2)
         n -= 1
 
-    return global_solution
+    return global_solution, convergence
+
+
+def categorize_relative_cost_diff(cost_diff):
+    if cost_diff > 0.05:
+        return 'worse'
+    elif cost_diff < -0.05:
+        return 'better'
+    else:
+        return 'similar'
+
+
+
+def select_best_action(q_table: Dict, state):
+
+    state_actions = q_table.get(state, {})
+    if not state_actions:
+        return 0  
+    max_q = max(state_actions.values())
+    max_actions = [action for action, q_value in state_actions.items() if q_value == max_q]
+    return max_actions[0]  # return the first action with max Q-value
+
+
+def update_q_table(q_table: Dict, state, action, reward, next_state, alpha, gamma):
+    # Update Q-value using the Q-learning update rule
+    state_actions = q_table.setdefault(state, {})
+    q_value = state_actions.get(action, 0)
+
+    # Get max Q-value for the next state
+    next_state_actions = q_table.get(next_state, {})
+    if next_state_actions:
+        max_next_q_value = max(next_state_actions.values())
+    else:
+        max_next_q_value = 0
+
+    new_q_value = alpha*q_value + (1-alpha) * (reward + gamma * max_next_q_value - q_value)
+    state_actions[action] = new_q_value
+
 
 
 def move_solution_independently(solution: Solution, distances: FloatMatrix, max_no_improv: int, rng: Random):
@@ -131,13 +200,6 @@ def move_solution_to_swarm_best(solution: Solution, swarm_solution: Solution, di
     solution.cost = cost
 
 
-def define_velocity(probas: List[float], rng: Random = None) -> int:
-    assert sum(probas) == 1.0, 'Sum of all probabilities must be equal to 1.'
-    indices = list(range(len(probas)))
-    chosen_velocities_ids = rng.choices(indices, probas, k=1)
-    return chosen_velocities_ids[0]  # select and return the first velocity id in the pool.
-
-
 def evaluate_cost(seq: List[int], distances: FloatMatrix) -> float:
     cost = 0
     n = len(seq)
@@ -153,7 +215,7 @@ def path_relinking_search(
         distances: FloatMatrix
 ) -> Tuple[List[int], float]:
 
-    best_seq = target
+    best_seq = target.copy()
     best_cost = target_cost
 
     target_value = target[0]
@@ -223,15 +285,59 @@ def neighborhood_inversion_search(
 
 
 def create_solution(sequence: List[int], cost: float) -> Solution:
-    return Solution(sequence, cost, sequence, cost)
+    return Solution(sequence.copy(), cost, sequence.copy(), cost)
 
 
 def copy_solution(solution: Solution) -> Solution:
-    return Solution(solution.sequence, solution.cost, solution.best_sequence, solution.best_cost)
+    return Solution(solution.sequence.copy(), solution.cost, solution.best_sequence.copy(), solution.best_cost)
 
 
 def copy_solution_to(src: Solution, dst: Solution):
-    dst.sequence = src.sequence
+    dst.sequence = src.sequence.copy()
     dst.cost = src.cost
-    dst.best_sequence = src.best_sequence
+    dst.best_sequence = src.best_sequence.copy()
     dst.best_cost = src.best_cost
+
+import matplotlib.pyplot as plt
+from typing import List
+
+def plot_solution_path(problem: Problem, solution: Solution):
+    # Extract the positions from the problem using the sequence in the solution
+    positions = problem.positions
+    sequence = solution.sequence
+
+    # Create lists of x and y coordinates in the order of the sequence
+    x_coords = [positions[i].x for i in sequence] + [positions[sequence[0]].x]  # to complete the loop
+    y_coords = [positions[i].y for i in sequence] + [positions[sequence[0]].y]  # to complete the loop
+
+    # Plotting the path
+    plt.figure(figsize=(8, 8))
+    plt.plot(x_coords, y_coords, marker='o', linestyle='-', color='b')
+
+    # Annotate the points
+    for i, pos in enumerate(positions):
+        plt.text(pos.x, pos.y, f'{i}', fontsize=12, ha='right')
+
+    # Plot start point
+    plt.plot(x_coords[0], y_coords[0], 'ro')  # Red dot for the start point
+
+    # Labels and title
+    plt.xlabel('X Coordinate')
+    plt.ylabel('Y Coordinate')
+    plt.title('Solution Path')
+
+    plt.grid(True)
+    plt.show()
+
+def plot_convergence(convergence_history: List[float]):
+    # Plotting the convergence history
+    plt.figure(figsize=(8, 6))
+    plt.plot(range(len(convergence_history)), convergence_history, marker='o', linestyle='-', color='r')
+
+    # Labels and title
+    plt.xlabel('Iteration')
+    plt.ylabel('Global Best Cost')
+    plt.title('Convergence Graph')
+
+    plt.grid(True)
+    plt.show()

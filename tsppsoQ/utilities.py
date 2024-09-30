@@ -1,6 +1,6 @@
 from typing import List
 
-from tsppso.datatypes import FloatMatrix, Position
+from datatypes import FloatMatrix, Position
 
 
 def euclidean_distance(a: Position, b: Position) -> float:
